@@ -1,0 +1,32 @@
+Name:                webproxy-wai
+Version:             0.1.0
+Synopsis:            web proxy application built with wai and warp
+-- Description:         
+License:             GPL-3
+License-file:        LICENSE
+Author:              yihuang
+Maintainer:          yi.codeplayer@gmail.com
+Category:            Web
+Build-type:          Simple
+-- Extra-source-files:  
+Cabal-version:       >=1.6
+
+source-repository head
+  type:     git
+  location: git://github.com/yihuang/tag-stream.git
+
+Executable webproxy-wai
+  Main-is:           Main.hs
+  
+  Build-depends:       base>=4 && <5
+                     , wai
+                     , warp
+                     , attoparsec
+                     , enumerator
+                     , http-enumerator
+                     , bytestring
+                     , blaze-builder
+                     , http-types
+                     , transformers
+                     , tag-stream
+  -- Other-modules:       

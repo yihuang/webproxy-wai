@@ -1,4 +1,5 @@
 {-# LANGUAGE RecordWildCards, OverloadedStrings #-}
+import Data.Maybe
 import Data.Monoid (mempty, mappend, mconcat)
 import Control.Monad.IO.Class (liftIO)
 import Control.Applicative
@@ -11,25 +12,27 @@ import qualified Data.Enumerator.List as EL
 import Blaze.ByteString.Builder
 import Data.ByteString (ByteString)
 import qualified Data.ByteString.Char8 as S
--- import qualified Data.ByteString.Base64 as B64
 import qualified Data.ByteString.Lazy.Char8 as L
 import qualified Network.HTTP.Enumerator as C -- client
-import Text.StringLike
-import Text.HTML.TagSoup (Tag (..), renderTags, parseTags)
+import Data.Attoparsec (parseOnly)
+import Text.HTML.TagStream (tokenStream, Token, showToken)
+import FilterUrl (withHost)
 
 portNumber = 3000 :: Int
-
-hostSuffix :: ByteString
-hostSuffix = ".localhost"
+domainSuffix = ".proxy"
+hostSuffix = S.pack (".proxy:"++show portNumber)
 
 blaze :: (Status -> ResponseHeaders -> Iteratee Builder IO a)
       -> Status -> ResponseHeaders -> Iteratee ByteString IO a
 blaze f status headers =
   let notEncoding ("Content-Encoding", _) = False
       notEncoding _ = True
+      ct = fromMaybe "text/plain" $ lookup "content-type" headers
       headers' = filter notEncoding headers
-      iter = f status headers'
-  in  E.joinI $ EL.map fromByteString E.$$ iter
+      iter' = f status headers'
+      iter = E.joinI $ EL.map fromByteString E.$$ iter'
+      filterHost = E.joinI . (tokenStream E.$$) . E.joinI . (withHost (flip S.append hostSuffix) E.$$) . E.joinI . (EL.map (showToken id) E.$$)
+  in  if ct=="text/html" then filterHost iter' else iter
 
 fetch :: C.Request IO
        -> (Status -> ResponseHeaders -> Iteratee Builder IO a)
@@ -38,45 +41,25 @@ fetch req f = C.withManager $ \m ->
                 E.run_ $ C.http req (blaze f) m
 
 logReq :: C.Request IO -> IO ()
-logReq C.Request{..} = S.putStrLn log
+logReq rq = S.putStrLn log
   where log = mconcat
-                [ method
-                , if secure then "https://" else "http://"
-                , host
-                , if port==80 then mempty else ":" `mappend` (S.pack $ show port)
-                , path
+                [ C.method rq
+                , if C.secure rq then "https://" else "http://"
+                , C.host rq
+                , if C.port rq==80 then mempty else ":" `mappend` (S.pack . show $ C.port rq)
+                , C.path rq
                 ]
-
-withUrls :: (ByteString -> ByteString) -> ByteString -> ByteString
-withUrls f = renderTags . map tag . parseTags
-  where
-    tag (TagOpen s a) = TagOpen s $ map attr a
-    tag x = x
-    refs = ["src", "href"]
-    attr (k, v) = (k, if k `elem` refs then f v else v)
-
-appendHost :: ByteString -> ByteString
-appendHost url =
-    if "http://" `S.isPrefixOf` url
-      then handle (S.take 7 url)
-      else
-        if "https://" `S.isPrefixOf` url
-          then handle (S.take 8 url)
-          else url
-  where
-    handle url =
-       let (dom, path) = S.break (=='/') url
-       in  mconcat [dom, hostSuffix, ":", S.pack (show 3000), path]
 
 app :: Application
 app Request{..} = do
+    -- TODO streamline request body
     body <- L.fromChunks <$> EL.consume
     let req = mkReq body
     liftIO $ logReq req
     return $ ResponseEnumerator $ fetch req
   where
     fullhost = (S.take
-                 (S.length serverName - S.length hostSuffix)
+                 (S.length serverName - S.length domainSuffix)
                  serverName)
     (host, port) = S.break (==':') fullhost
     mkReq :: L.ByteString -> C.Request IO
