@@ -4,7 +4,7 @@ module FilterUrl where
 import Data.Monoid
 import Control.Applicative
 import System.Environment (getArgs)
-import System.IO (openBinaryFile, IOMode(..))
+import System.IO (stdout)
 import qualified Data.Enumerator.Binary as E
 import Data.ByteString (ByteString)
 import qualified Data.ByteString.Char8 as S
@@ -13,6 +13,7 @@ import qualified Data.Enumerator.List as EL
 import Data.Attoparsec.Char8
 import Text.HTML.TagStream
 import Blaze.ByteString.Builder (toByteString)
+import Web.Cookie
 
 type Protocol = ByteString
 type Domain = ByteString
@@ -22,8 +23,8 @@ url = (,,) <$> (string "http://" <|> string "https://")
            <*> takeTill (=='/')
            <*> takeByteString
 
-changeHost :: (ByteString -> ByteString) -> ByteString -> ByteString
-changeHost f s = either (const s) changeDomain $ parseOnly url s
+mapUrlDomain :: (ByteString -> ByteString) -> ByteString -> ByteString
+mapUrlDomain f s = either (const s) changeDomain $ parseOnly url s
   where
     changeDomain (prop, domain, path) =
       S.concat [ prop
@@ -31,24 +32,24 @@ changeHost f s = either (const s) changeDomain $ parseOnly url s
                , path
                ]
 
-withHost :: Monad m => (ByteString -> ByteString) -> E.Enumeratee Token Token m b
-withHost f = withUrl (changeHost f)
+mapCookieDomain :: (ByteString -> ByteString) -> ByteString -> ByteString
+mapCookieDomain f s = toByteString . renderSetCookie $ cookie { setCookieDomain=fmap f (setCookieDomain cookie) }
+  where cookie = parseSetCookie s
 
-withUrl :: Monad m => (ByteString -> ByteString) -> E.Enumeratee Token Token m b
-withUrl f = EL.map filter'
-  where filter' :: Token -> Token
-        filter' (TagOpen name as close)  = TagOpen name (map filter'' as) close
-        filter' t = t
-        filter'' :: Attr -> Attr
-        filter'' (name, value)
-            | name=="href" || name=="src" = (name, f value)
-            | otherwise = (name, value)
+mapSnd :: (b -> c) -> (a, b) -> (a, c)
+mapSnd f (a, b) = (a, f b)
+
+mapValue :: (ByteString -> ByteString) -> Token -> Token
+mapValue f (TagOpen name as close)  = TagOpen name (map (mapSnd f) as) close 
+mapValue _ t = t
 
 main :: IO ()
 main = do
     [filename] <- getArgs
-    h <- openBinaryFile filename ReadMode
-    let bufSize = 2
-        enum = E.enumHandle bufSize h
-    tokens <- E.run_ $ ((enum E.$= tokenStream) E.$= withHost (flip S.append ".proxy.com")) E.$$ EL.consume
-    S.putStrLn $ toByteString . mconcat $ map (showToken id) tokens
+    _ <- E.run_ $ E.enumFile filename
+             E.$= tokenStream
+             E.$= EL.map (mapValue (mapUrlDomain (`S.append` ".proxy")))
+             E.$= EL.map (showToken id)
+             E.$= EL.map toByteString
+             E.$$ E.iterHandle stdout
+    return ()
